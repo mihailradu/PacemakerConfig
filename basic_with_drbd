@@ -1,0 +1,68 @@
+#!/bin/bash
+NODE1_NAME="node1"
+NODE2_NAME="node2"
+VIRT_RESOURCE_GROUP_NAME="vPlot"
+VIRT_IP="172.28.255.113"
+SHARED_STORAGE_MP="/data_persistent/"
+SHARED_STORAGE_DEVICE_NAME="/dev/drbd0"
+DRBD_RESOURCE_NAME="persistent"
+SHARED_STORAGE_FS_TYPE="ext3"
+LSB_APP_LIST="nfsserver volatileVM"
+
+IPMI_NODE1_IP="172.28.255.101"
+IPMI_NODE2_IP="172.28.255.102"
+
+#Special params (you dont need to change this normally)
+VIRT_IP_ON_WHAT_NIC="br0"
+VIRT_IP_LABEL="v0"
+
+IPMI_USERNAME="admin"
+IPMI_PASSWORD="admin"
+
+
+
+
+crm configure erase
+crm configure commit 
+
+
+crm configure primitive "$NODE1_NAME"_killer stonith:external/ipmi \
+        params hostname="$NODE1_NAME" ipaddr="$IPMI_NODE1_IP" \
+               userid="$IPMI_USERNAME" passwd="$IPMI_PASSWORD" \
+               op monitor interval=10m timeout=60s
+crm configure primitive "$NODE2_NAME"_killer stonith:external/ipmi \
+        params hostname="$NODE2_NAME" ipaddr="$IPMI_NODE2_IP" \
+               userid="$IPMI_USERNAME" passwd="$IPMI_PASSWORD" \
+               op monitor interval=10m timeout=60s
+
+crm configure location loc_"$NODE1_NAME"_killer "$NODE1_NAME"_killer -inf: "$NODE1_NAME"
+crm configure location loc_"$NODE2_NAME"_killer "$NODE2_NAME"_killer -inf: "$NODE2_NAME"
+
+crm configure primitive drbd0 ocf:linbit:drbd \
+	op monitor interval="20" role="Slave" \
+        op monitor interval="10" role="Master" \
+        params drbd_resource=$DRBD_RESOURCE_NAME
+
+
+crm configure ms ms-drbd0 drbd0 \
+	meta clone-max="2" notify="true" target-role="Started"
+
+
+crm configure primitive IP-PlotSMB ocf:heartbeat:IPaddr2 \
+        params ip=$VIRT_IP nic=$VIRT_IP_ON_WHAT_NIC \
+        iflabel=$VIRT_IP_LABEL 
+
+crm configure primitive FS-data_persistent ocf:heartbeat:Filesystem \
+        params fstype=$SHARED_STORAGE_FS_TYPE \
+        directory=$SHARED_STORAGE_MP \
+        device=$SHARED_STORAGE_DEVICE_NAME
+
+crm configure order DRBD0-defore-FS mandatory: ms-drbd0:promote FS-data_persistent:start
+crm configure colocation FS-on-DRBD-Master inf: FS-data_persistent ms-drbd0:Master
+
+crm configure primitive NFS-SRV lsb:nfsserver
+
+crm configure primitive VM-PlotSMBv lsb:volatileVM
+
+crm configure group $VIRT_RESOURCE_GROUP_NAME IP-PlotSMB FS-data_persistent NFS-SRV VM-PlotSMBv \
+        meta target-role="Started"
